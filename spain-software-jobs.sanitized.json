@@ -1,0 +1,688 @@
+{
+  "name": "Spain Software Jobs — Daily AI Review Queue (75%+)",
+  "nodes": [
+    {
+      "parameters": {
+        "jsCode": "\nconst boards = [\n  { company: \"Auctane\", token: \"auctane\" },\n  { company: \"Aircall\", token: \"aircallioinc\" },\n  { company: \"Cabify\", token: \"cabify\" },\n  { company: \"Ebury\", token: \"ebury\" },\n  { company: \"Celonis\", token: \"celonis\" },\n  { company: \"Sofico\", token: \"soficonv\" },\n\n  // Additional Greenhouse boards\n  { company: \"Scopely\", token: \"scopely\" },\n  { company: \"New Relic\", token: \"newrelic\" },\n  { company: \"Socialpoint\", token: \"spcareers\" }\n];\n\nreturn boards.map(board => ({\n  json: board\n}));\n"
+      },
+      "name": "Configure company boards",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        -192
+      ],
+      "id": "node-1"
+    },
+    {
+      "parameters": {
+        "url": "={{\n  \"https://boards-api.greenhouse.io/v1/boards/\"\n  + $json.token\n  + \"/jobs?content=true\"\n}}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "name": "Read public vacancies",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        448,
+        -192
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "onError": "continueRegularOutput",
+      "id": "node-2"
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst results = $input.all();\n\nconst rolePattern =\n  /(\\.net|c#|csharp|mulesoft|integration|integrations|full[\\s-]?stack|software engineer|software developer|backend|back-end|api developer|vue\\.?js)/i;\n\nconst spainPattern =\n  /(\\bspain\\b|\\bespaña\\b|\\bespana\\b|\\bES\\b|madrid|barcelona|valencia|málaga|malaga|sevilla|seville|bilbao|zaragoza|alicante|granada|murcia|valladolid)/i;\n\nconst matches = [];\n\nfor (let i = 0; i < results.length; i++) {\n  const response = results[i].json;\n  const jobs = response.jobs || [];\n\n  for (const job of jobs) {\n    const title = job.title || \"\";\n    const location = job.location?.name || \"\";\n\n    const isTargetRole = rolePattern.test(title);\n    const isSpain = spainPattern.test(location);\n\n    if (!isTargetRole || !isSpain) continue;\n\n    matches.push({\n      json: {\n        id: String(job.id),\n        company: job.company_name || \"Unknown Company\",\n        title,\n        location,\n        description: (job.content || \"\")\n        .replace(/<[^>]*>/g, \" \")\n        .replace(/&lt;[^&]*&gt;/g, \" \")\n        .replace(/&[a-zA-Z0-9#]+;/g, \" \")\n        .replace(/\\s+/g, \" \")\n        .trim()\n        .slice(0, 8000),\n        url: job.absolute_url || \"\",\n        source: \"Greenhouse\",\n        updated_at: job.updated_at || \"\",\n        status: \"Needs review\"\n      }\n    });\n  }\n}\n\nreturn matches;\n"
+      },
+      "name": "Filter Spain target roles",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        672,
+        -192
+      ],
+      "id": "node-3"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:11434/api/chat",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "=\n{{ JSON.stringify({\n  model: \"qwen3:4b\",\n  stream: false,\n  think: false,\n  format: \"json\",\n  options: {\n    temperature: 0.1,\n    num_predict: 1000\n  },\n  messages: [\n    {\n      role: \"system\",\n      content: `You are a technical recruitment evaluator.\n\nEvaluate the candidate against the actual job requirements.\n\nCandidate:\nREPLACE_WITH_YOUR_LOCAL_CANDIDATE_PROFILE\n\nScoring:\nTechnical skills: 45 points\nRelevant experience: 25 points\nSeniority and responsibilities: 20 points\nOther requirements: 10 points\n\nScore fairly between 0 and 100.\nA missing programming language may lower the score,\nbut does not automatically make it zero.\n\nVisa classification:\nexplicit_support = sponsorship clearly offered\nexplicitly_restricted = sponsorship explicitly unavailable\npossible_unknown = sponsorship not mentioned or unclear\n\nDo not classify unknown sponsorship as restricted.\n\nReturn a JSON object containing these exact fields:\nscore, visa_status, summary, cv_focus, evidence.\n\nWrite meaningful explanations.\nDo not return empty strings.\nDo not invent candidate qualifications.`\n    },\n    {\n      role: \"user\",\n      content: `Job: ${$json.title}\nCompany: ${$json.company}\nLocation: ${$json.location}\n\nRequirements:\n${String($json.description || \"\").slice(0, 3500)}`\n    }\n  ]\n}) }}\n",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "name": "OpenAI evaluate match",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1616,
+        0
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "onError": "continueRegularOutput",
+      "id": "node-4"
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst aiResults = $input.all();\nconst approved = [];\n\nfor (let i = 0; i < aiResults.length; i++) {\n  const response = aiResults[i].json;\n\n  if (response.error || !response.message?.content) {\n    continue;\n  }\n\n  let assessment;\n\n  try {\n    assessment = JSON.parse(response.message.content);\n  } catch (error) {\n    continue;\n  }\n\n  const score = Number(assessment.score);\n  const visa = assessment.visa_status;\n\n  if (!Number.isFinite(score)) continue;\n  if (score < 75 || score > 100) continue;\n\n  if (![\n    \"explicit_support\",\n    \"possible_unknown\"\n  ].includes(visa)) {\n    continue;\n  }\n\n  // Recover the vacancy linked to this AI response.\n  let job;\n\n  try {\n    job = $(\"Limit1\").itemMatching(i).json;\n  } catch (error) {\n    throw new Error(\n      \"Cannot match AI result to vacancy: \" +\n      error.message\n    );\n  }\n\n  if (!job?.id || !job?.url) {\n    throw new Error(\n      \"Original job ID or application URL is missing\"\n    );\n  }\n\n  approved.push({\n    json: {\n      id: String(job.id),\n      date: new Date().toISOString().slice(0, 10),\n      company: job.company,\n      title: job.title,\n      location: job.location,\n      score: score,\n      visa_status: visa,\n      summary: assessment.summary || \"\",\n      cv_focus: assessment.cv_focus || \"\",\n      cover_letter_draft:\n        assessment.cover_letter_draft || \"\",\n      evidence: assessment.evidence || \"\",\n      url: job.url,\n      source: job.source || \"Greenhouse\",\n      status: \"Needs review\"\n    },\n    pairedItem: { item: i }\n  });\n}\n\nreturn approved;\n"
+      },
+      "name": "Keep 75+ and deduplicate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1856,
+        0
+      ],
+      "id": "node-5"
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "REPLACE_WITH_SPREADSHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Review Queue",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [
+            "id"
+          ],
+          "schema": [
+            {
+              "id": "id",
+              "displayName": "id",
+              "required": false,
+              "defaultMatch": true,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "date",
+              "displayName": "date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "company",
+              "displayName": "company",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "title",
+              "displayName": "title",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "location",
+              "displayName": "location",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "score",
+              "displayName": "score",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "visa_status",
+              "displayName": "visa_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "summary",
+              "displayName": "summary",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "cv_focus",
+              "displayName": "cv_focus",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "cover_letter_draft",
+              "displayName": "cover_letter_draft",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "evidence",
+              "displayName": "evidence",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "url",
+              "displayName": "url",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "source",
+              "displayName": "source",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "name": "Append review queue",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        2752,
+        0
+      ],
+      "id": "node-6"
+    },
+    {
+      "parameters": {
+        "jsCode": "const rows=$('Filter new jobs').all().map(x=>x.json);\nif(!rows.length) return [];\nconst esc=s=>String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');\nconst report=rows.map((r,i)=>`<tr><td style=\"padding:12px;border-bottom:1px solid #ddd\"><strong>${i+1}. ${esc(r.title)}</strong><br>${esc(r.company)} — ${esc(r.location)}<br>Score: ${r.score}% | Visa: ${esc(r.visa_status)}<br>${esc(r.summary)}<br><strong>CV emphasis:</strong> ${esc(r.cv_focus)}<br><strong>Suggested cover letter:</strong><br>${esc(r.cover_letter_draft)}<br><a href=\"${esc(r.url)}\">Review and apply on official career page</a></td></tr>`).join('');\nreturn [{json:{subject:`Spain software jobs: ${rows.length} new matches for review`,html:`<h2>Spain job review queue</h2><p>No applications have been submitted. Verify work authorization, employer, and every CV claim before applying.</p><table>${report}</table><p>Update status in Google Sheets after submitting.</p>`}}];"
+      },
+      "name": "Create daily review digest",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2944,
+        176
+      ],
+      "id": "node-7"
+    },
+    {
+      "parameters": {
+        "sendTo": "REPLACE_WITH_YOUR_EMAIL",
+        "subject": "={{ $json.subject }}",
+        "message": "={{ $json.html }}",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "name": "Email digest to yourself",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        2944,
+        0
+      ],
+      "id": "node-8"
+    },
+    {
+      "parameters": {
+        "maxItems": 6
+      },
+      "type": "n8n-nodes-base.limit",
+      "typeVersion": 1,
+      "position": [
+        1360,
+        0
+      ],
+      "name": "Limit1",
+      "id": "node-9"
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "REPLACE_WITH_SPREADSHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Review Queue",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        2128,
+        0
+      ],
+      "name": "Check existing applications",
+      "alwaysOutputData": true,
+      "id": "node-10"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        2384,
+        -192
+      ],
+      "name": "Merge",
+      "id": "node-11"
+    },
+    {
+      "parameters": {
+        "jsCode": "\n// ============================================\n// SPAIN JOB APPLICATION AGENT\n// Filter New Jobs + Visa Prioritization\n// ============================================\n\nconst newJobs =\n  $(\"Keep 75+ and deduplicate\").all();\n\nconst existingRows =\n  $(\"Check existing applications\").all();\n\n// Minimum AI match score\nconst MIN_SCORE = 75;\n\n// Allowed visa sponsorship classifications\nconst allowedVisaStatuses = [\n  \"explicit_support\",\n  \"possible_unknown\"\n];\n\n// Visa sponsorship priority\nconst visaPriority = {\n  explicit_support: 0,\n  possible_unknown: 1\n};\n\n// ============================================\n// STEP 1: Collect existing job IDs\n// ============================================\n\nconst existingIds = new Set(\n  existingRows\n    .map(item => String(item.json.id ?? \"\").trim())\n    .filter(Boolean)\n);\n\n// ============================================\n// STEP 2: Filter new job opportunities\n// ============================================\n\nconst seenInThisRun = new Set();\nconst result = [];\n\nfor (const item of newJobs) {\n  const job = item.json;\n\n  const id = String(job.id ?? \"\").trim();\n  const score = Number(job.score);\n  const visaStatus = String(\n    job.visa_status ?? \"\"\n  ).trim();\n\n  // Skip incomplete job records\n  if (!id || !job.title || !job.url) {\n    continue;\n  }\n\n  // Reject scores below 75%\n  if (\n    !Number.isFinite(score) ||\n    score < MIN_SCORE ||\n    score > 100\n  ) {\n    continue;\n  }\n\n  // Exclude restricted or unclassified visa cases\n  if (!allowedVisaStatuses.includes(visaStatus)) {\n    continue;\n  }\n\n  // Skip jobs already in Google Sheets\n  if (existingIds.has(id)) {\n    continue;\n  }\n\n  // Skip duplicates from the same execution\n  if (seenInThisRun.has(id)) {\n    continue;\n  }\n\n  seenInThisRun.add(id);\n\n  // Preserve the original vacancy and AI assessment\n  result.push({\n    json: {\n      ...job,\n      id,\n      score,\n      visa_status: visaStatus,\n      status: \"Needs review\"\n    }\n  });\n}\n\n// ============================================\n// STEP 3: Prioritize visa sponsorship\n// ============================================\n\nresult.sort((a, b) => {\n  const visaA =\n    visaPriority[a.json.visa_status] ?? 99;\n\n  const visaB =\n    visaPriority[b.json.visa_status] ?? 99;\n\n  // Confirmed sponsorship first\n  if (visaA !== visaB) {\n    return visaA - visaB;\n  }\n\n  // Higher match score first\n  return Number(b.json.score) -\n         Number(a.json.score);\n});\n\n// ============================================\n// STEP 4: Return shortlisted jobs\n// ============================================\n\nreturn result;\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2528,
+        -192
+      ],
+      "name": "Filter new jobs",
+      "id": "node-12"
+    },
+    {
+      "parameters": {
+        "url": "https://api.lever.co/v0/postings/rover?mode=json",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        224,
+        0
+      ],
+      "name": "Read Rover jobs",
+      "id": "node-13"
+    },
+    {
+      "parameters": {
+        "url": "https://api.eu.lever.co/v0/postings/prima?mode=json",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        208,
+        224
+      ],
+      "name": "Read Prima jobs",
+      "id": "node-14"
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst input = $input.all();\n\nconst first = $(\"Daily 08:00 Spain\").first();\n// Identify the source from the incoming Lever job URL.\nconst records = input.flatMap(item => {\n  const value = item.json;\n  if (Array.isArray(value)) return value;\n  if (Array.isArray(value.data)) return value.data;\n  if (Array.isArray(value.body)) return value.body;\n  return [value];\n});\n\nconst rolePattern =\n  /(\\.net|c#|csharp|mulesoft|integration|full[\\s-]?stack|software engineer|software developer|backend|back.end|api developer|vue|frontend|front.end)/i;\n\nconst spainPattern =\n  /(\\bspain\\b|\\bespaña\\b|\\bespana\\b|\\bES\\b|madrid|barcelona|valencia|malaga|málaga|sevilla|bilbao|alicante|zaragoza|murcia)/i;\n\nconst normalized = [];\n\nfor (let i = 0; i < records.length; i++) {\n  const job = records[i];\n\n  if (!job.id || !job.text) continue;\n\n  const url = job.hostedUrl || job.applyUrl || \"\";\n  const isPrima =\n    url.includes(\"jobs.eu.lever.co/prima/\");\n\n  const company = isPrima ? \"Prima\" : \"Rover\";\n  const site = isPrima ? \"prima\" : \"rover\";\n\n  const title = String(job.text || \"\");\n  const location = String(\n    job.categories?.location ||\n    job.categories?.allLocations?.join(\", \") ||\n    job.country ||\n    \"\"\n  );\n\n  if (!rolePattern.test(title)) continue;\n  if (!spainPattern.test(location)) continue;\n\n  const description = [\n    job.descriptionPlain,\n    job.openingPlain,\n    job.descriptionBodyPlain,\n    job.additionalPlain,\n    ...(job.lists || []).map(x => x.content || \"\")\n  ].filter(Boolean).join(\" \");\n\n  normalized.push({\n    json: {\n      id: \"lever:\" + site + \":\" + String(job.id),\n      company,\n      title,\n      location,\n      description: description\n        .replace(/<[^>]*>/g, \" \")\n        .replace(/\\s+/g, \" \")\n        .trim()\n        .slice(0, 8000),\n      url,\n      source: \"Lever\",\n      status: \"Needs review\"\n    }\n  });\n}\n\n// Keep the branch available even if no jobs match.\nreturn normalized.length\n  ? normalized\n  : [{ json: { skip: true, source: \"Lever\" } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        432,
+        0
+      ],
+      "name": "Normalize Rover job",
+      "id": "node-15"
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst input = $input.all();\n\nconst first = $(\"Daily 08:00 Spain\").first();\n// Identify the source from the incoming Lever job URL.\nconst records = input.flatMap(item => {\n  const value = item.json;\n  if (Array.isArray(value)) return value;\n  if (Array.isArray(value.data)) return value.data;\n  if (Array.isArray(value.body)) return value.body;\n  return [value];\n});\n\nconst rolePattern =\n  /(\\.net|c#|csharp|mulesoft|integration|full[\\s-]?stack|software engineer|software developer|backend|back.end|api developer|vue|frontend|front.end)/i;\n\nconst spainPattern =\n  /(\\bspain\\b|\\bespaña\\b|\\bespana\\b|\\bES\\b|madrid|barcelona|valencia|malaga|málaga|sevilla|bilbao|alicante|zaragoza|murcia)/i;\n\nconst normalized = [];\n\nfor (let i = 0; i < records.length; i++) {\n  const job = records[i];\n\n  if (!job.id || !job.text) continue;\n\n  const url = job.hostedUrl || job.applyUrl || \"\";\n  const isPrima =\n    url.includes(\"jobs.eu.lever.co/prima/\");\n\n  const company = isPrima ? \"Prima\" : \"Rover\";\n  const site = isPrima ? \"prima\" : \"rover\";\n\n  const title = String(job.text || \"\");\n  const location = String(\n    job.categories?.location ||\n    job.categories?.allLocations?.join(\", \") ||\n    job.country ||\n    \"\"\n  );\n\n  if (!rolePattern.test(title)) continue;\n  if (!spainPattern.test(location)) continue;\n\n  const description = [\n    job.descriptionPlain,\n    job.openingPlain,\n    job.descriptionBodyPlain,\n    job.additionalPlain,\n    ...(job.lists || []).map(x => x.content || \"\")\n  ].filter(Boolean).join(\" \");\n\n  normalized.push({\n    json: {\n      id: \"lever:\" + site + \":\" + String(job.id),\n      company,\n      title,\n      location,\n      description: description\n        .replace(/<[^>]*>/g, \" \")\n        .replace(/\\s+/g, \" \")\n        .trim()\n        .slice(0, 8000),\n      url,\n      source: \"Lever\",\n      status: \"Needs review\"\n    }\n  });\n}\n\n// Keep the branch available even if no jobs match.\nreturn normalized.length\n  ? normalized\n  : [{ json: { skip: true, source: \"Lever\" } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        432,
+        224
+      ],
+      "name": "Normalize Prima jobs",
+      "id": "node-16"
+    },
+    {
+      "parameters": {
+        "numberInputs": 3
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        976,
+        -16
+      ],
+      "name": "Merge job sources",
+      "id": "node-17"
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst groups = {\n  Greenhouse: [],\n  Lever: []\n};\n\nconst seen = new Set();\n\nfor (const item of $input.all()) {\n  const job = item.json;\n\n  if (job.skip || !job.id || !job.title || !job.url) {\n    continue;\n  }\n\n  const id = String(job.id);\n  if (seen.has(id)) continue;\n  seen.add(id);\n\n  const source = job.source === \"Lever\"\n    ? \"Lever\"\n    : \"Greenhouse\";\n\n  groups[source].push(item);\n}\n\nconst result = [];\n\nwhile (groups.Greenhouse.length || groups.Lever.length) {\n  for (const source of [\"Greenhouse\", \"Lever\"]) {\n    if (groups[source].length) {\n      result.push(groups[source].shift());\n    }\n  }\n}\n\nreturn result.map((item, index) => ({\n  json: item.json,\n  pairedItem: { item: $input.all().findIndex(\n    x => String(x.json.id) === String(item.json.id)\n  )}\n}));\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1168,
+        0
+      ],
+      "name": "Prepare combined jobs",
+      "id": "node-18"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 8 * * *"
+            }
+          ]
+        }
+      },
+      "name": "Daily 08:00 Spain",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ],
+      "id": "node-19"
+    }
+  ],
+  "connections": {
+    "Configure company boards": {
+      "main": [
+        [
+          {
+            "node": "Read public vacancies",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read public vacancies": {
+      "main": [
+        [
+          {
+            "node": "Filter Spain target roles",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter Spain target roles": {
+      "main": [
+        [
+          {
+            "node": "Merge job sources",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI evaluate match": {
+      "main": [
+        [
+          {
+            "node": "Keep 75+ and deduplicate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Keep 75+ and deduplicate": {
+      "main": [
+        [
+          {
+            "node": "Check existing applications",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Append review queue": {
+      "main": [
+        [
+          {
+            "node": "Create daily review digest",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create daily review digest": {
+      "main": [
+        [
+          {
+            "node": "Email digest to yourself",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Limit1": {
+      "main": [
+        [
+          {
+            "node": "OpenAI evaluate match",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Email digest to yourself": {
+      "main": [
+        []
+      ]
+    },
+    "Check existing applications": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "Filter new jobs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter new jobs": {
+      "main": [
+        [
+          {
+            "node": "Append review queue",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Rover job": {
+      "main": [
+        [
+          {
+            "node": "Merge job sources",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Read Prima jobs": {
+      "main": [
+        [
+          {
+            "node": "Normalize Prima jobs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Rover jobs": {
+      "main": [
+        [
+          {
+            "node": "Normalize Rover job",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Prima jobs": {
+      "main": [
+        [
+          {
+            "node": "Merge job sources",
+            "type": "main",
+            "index": 2
+          }
+        ]
+      ]
+    },
+    "Merge job sources": {
+      "main": [
+        [
+          {
+            "node": "Prepare combined jobs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare combined jobs": {
+      "main": [
+        [
+          {
+            "node": "Limit1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Daily 08:00 Spain": {
+      "main": [
+        [
+          {
+            "node": "Configure company boards",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Read Rover jobs",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Read Prima jobs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Madrid"
+  },
+  "pinData": {}
+}
